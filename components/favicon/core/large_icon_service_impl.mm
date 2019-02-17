@@ -4,6 +4,7 @@
 
 #include "components/favicon/core/large_icon_service_impl.h"
 
+#include <UIKit/UIKit.h>
 #include <algorithm>
 #include <string>
 
@@ -124,23 +125,53 @@ bool IsDbResultAdequate(const favicon_base::FaviconRawBitmapResult& db_result,
          db_result.pixel_size.width() >= min_source_size;
 }
 
-// Wraps the PNG data in |db_result| in a gfx::Image. If |desired_size| is not
+// Wraps the PNG data in |db_result| in a SkBitmap. If |desired_size| is not
 // 0, the image gets decoded and resized to |desired_size| (in px). Must run on
 // a background thread in production.
-gfx::Image ResizeLargeIconOnBackgroundThread(
+SkBitmap ResizeLargeIconOnBackgroundThread(
     const favicon_base::FaviconRawBitmapResult& db_result,
     int desired_size) {
-  gfx::Image image = gfx::Image::CreateFrom1xPNGBytes(
-      db_result.bitmap_data->front(), db_result.bitmap_data->size());
+
+  gfx::Image image = gfx::Image::CreateFrom1xPNGBytes(db_result.bitmap_data->front(), db_result.bitmap_data->size());
+
+#if defined(OS_IOS)
+  UIImage *uiImage = image.ToUIImage();
+
+  SkBitmap bitmap;
+  if (!bitmap.tryAllocN32Pixels(desired_size, desired_size, false)) {
+      return bitmap;
+  }
+
+  void* data = bitmap.getPixels();
+
+  CGContextRef context = CGBitmapContextCreate(
+      data,
+      desired_size,
+      desired_size,
+      8,
+      desired_size * 4,
+      CGColorSpaceCreateDeviceRGB(),
+      kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+
+  CGContextSetBlendMode(context, kCGBlendModeCopy);
+  CGContextDrawImage(context, CGRectMake(0,0,desired_size,desired_size), uiImage.CGImage);
+
+  CGContextRelease(context);
+
+  return bitmap;
+#endif
 
   if (desired_size == 0 || db_result.pixel_size.width() == desired_size) {
-    return image;
+    return image.AsBitmap();
   }
 
   SkBitmap resized = skia::ImageOperations::Resize(
-      image.AsBitmap(), skia::ImageOperations::RESIZE_LANCZOS3, desired_size,
+      image.AsBitmap(),
+      skia::ImageOperations::RESIZE_LANCZOS3,
+      desired_size,
       desired_size);
-  return gfx::Image::CreateFrom1xBitmap(resized);
+
+  return resized;
 }
 
 // Processes the |db_result| and writes the result into |raw_result| if
@@ -156,18 +187,20 @@ void ProcessIconOnBackgroundThread(
     GURL* icon_url,
     favicon_base::FallbackIconStyle* fallback_icon_style) {
   if (IsDbResultAdequate(db_result, min_source_size)) {
-    gfx::Image image;
-    image = ResizeLargeIconOnBackgroundThread(db_result, desired_size);
+    SkBitmap resized;
+    resized = ResizeLargeIconOnBackgroundThread(db_result, desired_size);
 
-    if (!image.IsEmpty()) {
+    if(!resized.empty()) {
       if (raw_result) {
         *raw_result = db_result;
         if (desired_size != 0)
           raw_result->pixel_size = gfx::Size(desired_size, desired_size);
-        raw_result->bitmap_data = image.As1xPNGBytes();
+
+          gfx::Image image = gfx::Image::CreateFrom1xBitmap(resized);
+          raw_result->bitmap_data = image.As1xPNGBytes();
       }
       if (bitmap) {
-        *bitmap = image.AsBitmap();
+          *bitmap = resized;
       }
       if (icon_url) {
         *icon_url = db_result.icon_url;
